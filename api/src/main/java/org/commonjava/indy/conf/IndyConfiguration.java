@@ -16,7 +16,6 @@
 package org.commonjava.indy.conf;
 
 import java.io.File;
-import java.util.List;
 
 /**
  * Base configuration for Indy's core. This basically sets timeouts for a couple different (relatively obscure) features.
@@ -76,11 +75,40 @@ public interface IndyConfiguration
 
     Boolean isAllowRemoteListDownload();
 
+    /**
+     * Disposable stores can be deleted alone with its the content. It serves as a safe guard because mis-deleted
+     * repo definition can be restored but mis-deleted content can not.
+     */
+    String getDisposableStorePattern();
+
     int getRemoteMetadataTimeoutSeconds();
 
     int getForkJoinPoolCommonParallelism();
 
     boolean isClusterEnabled();
 
-    
+    String getCacheKeyspace();
+
+    String getAffectedGroupsExcludeFilter();
+
+    String getNfcProvider(); // ispn or cassandra (default)
+
+    /**
+     * Let indy run standalone local mode, which will not enable cassandra path mapped storage
+     * @return
+     * @since 2.0.0
+     */
+    Boolean isStandalone();
+
+    boolean isRepositoryFilterEnabled();
+
+    String getGACacheStorePattern();
+
+    /**
+     * FileSystemContaining is an operation by which we get what path in which repository. We use batching to
+     * limit the query candidates size to avoid huge 'IN' query.
+     * @return
+     * @since 2.1.0
+     */
+    int getFileSystemContainingBatchSize();
 }

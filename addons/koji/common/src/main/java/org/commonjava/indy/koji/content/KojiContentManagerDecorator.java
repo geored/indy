@@ -31,8 +31,7 @@ import org.commonjava.indy.data.IndyDataException;
 import org.commonjava.indy.data.StoreDataManager;
 import org.commonjava.indy.koji.conf.IndyKojiConfig;
 import org.commonjava.indy.koji.util.KojiUtils;
-import org.commonjava.indy.measure.annotation.Measure;
-import org.commonjava.indy.measure.annotation.MetricNamed;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 import org.commonjava.indy.model.core.ArtifactStore;
 import org.commonjava.indy.model.core.Group;
 import org.commonjava.indy.model.core.RemoteRepository;
@@ -63,7 +62,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.commonjava.indy.koji.model.IndyKojiConstants.KOJI_ORIGIN;
 import static org.commonjava.indy.koji.model.IndyKojiConstants.KOJI_ORIGIN_BINARY;
-import static org.commonjava.indy.measure.annotation.MetricNamed.DEFAULT;
 import static org.commonjava.indy.model.core.StoreType.group;
 import static org.commonjava.maven.galley.maven.util.ArtifactPathUtils.formatMetadataPath;
 
@@ -136,7 +134,7 @@ public abstract class KojiContentManagerDecorator
     private KojiPathPatternFormatter pathFormatter;
 
     @Override
-    @Measure( timers = @MetricNamed( DEFAULT ) )
+    @Measure
     public boolean exists( ArtifactStore store, String path )
             throws IndyWorkflowException
     {
@@ -172,7 +170,7 @@ public abstract class KojiContentManagerDecorator
     }
 
     @Override
-    @Measure( timers = @MetricNamed( DEFAULT ) )
+    @Measure
     public Transfer retrieve( final ArtifactStore store, final String path, final EventMetadata eventMetadata )
             throws IndyWorkflowException
     {
@@ -258,7 +256,7 @@ public abstract class KojiContentManagerDecorator
         return result;
     }
 
-    @Measure( timers = @MetricNamed( DEFAULT ), exceptions = @MetricNamed( DEFAULT ) )
+    @Measure
     private <T> T findKojiBuildAnd( ArtifactStore store, String path, EventMetadata eventMetadata, T defValue, KojiBuildAction<T> action )
             throws IndyWorkflowException
     {
@@ -449,7 +447,10 @@ public abstract class KojiContentManagerDecorator
                                                          kojiUtils.formatStorageUrl( config.getStorageRootUrl(), build ),
                                                          config.getDownloadTimeoutSeconds() );
 
-                remote.setServerCertPem( config.getServerPemContent() );
+                if ( config.getServerPemEnabled() )
+                {
+                    remote.setServerCertPem( config.getServerPemContent() );
+                }
 
                 if ( isBinaryBuild )
                 {

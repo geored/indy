@@ -15,20 +15,21 @@
  */
 package org.commonjava.indy.httprox.util;
 
-import org.commonjava.indy.sli.metrics.GoldenSignalsMetricSet;
+import org.commonjava.indy.sli.metrics.IndyGoldenSignalsMetricSet;
 import org.slf4j.Logger;
-import org.slf4j.MDC;
+import org.commonjava.indy.util.RequestContextHelper;
 
 import java.net.SocketAddress;
 
 import static java.lang.Integer.parseInt;
-import static org.commonjava.indy.metrics.RequestContextHelper.HTTP_METHOD;
-import static org.commonjava.indy.metrics.RequestContextHelper.HTTP_STATUS;
-import static org.commonjava.indy.metrics.RequestContextHelper.REQUEST_LATENCY_NS;
-import static org.commonjava.indy.metrics.RequestContextHelper.REQUEST_PHASE;
-import static org.commonjava.indy.metrics.RequestContextHelper.REQUEST_PHASE_END;
-import static org.commonjava.indy.metrics.RequestContextHelper.getContext;
-import static org.commonjava.indy.metrics.RequestContextHelper.setContext;
+import static org.commonjava.indy.util.RequestContextHelper.HTTP_METHOD;
+import static org.commonjava.indy.util.RequestContextHelper.HTTP_STATUS;
+import static org.commonjava.indy.util.RequestContextHelper.REQUEST_LATENCY_NS;
+import static org.commonjava.indy.util.RequestContextHelper.REQUEST_PHASE;
+import static org.commonjava.indy.util.RequestContextHelper.REQUEST_PHASE_END;
+import static org.commonjava.indy.util.RequestContextHelper.getContext;
+import static org.commonjava.indy.util.RequestContextHelper.setContext;
+import static org.commonjava.indy.subsys.metrics.IndyTrafficClassifierConstants.FN_CONTENT_GENERIC;
 
 public class ProxyMeter
 {
@@ -40,13 +41,13 @@ public class ProxyMeter
 
     private final long startNanos;
 
-    private final GoldenSignalsMetricSet sliMetricSet;
+    private final IndyGoldenSignalsMetricSet sliMetricSet;
 
     private final Logger restLogger;
 
     private final SocketAddress peerAddress;
 
-    public ProxyMeter( final String method, final String requestLine, final long startNanos, final GoldenSignalsMetricSet sliMetricSet, final Logger restLogger,
+    public ProxyMeter( final String method, final String requestLine, final long startNanos, final IndyGoldenSignalsMetricSet sliMetricSet, final Logger restLogger,
                        final SocketAddress peerAddress )
     {
         this.method = method;
@@ -73,13 +74,13 @@ public class ProxyMeter
 
             long latency = System.nanoTime() - startNanos;
 
-            MDC.put( REQUEST_LATENCY_NS, String.valueOf( latency ) );
+            RequestContextHelper.setContext( REQUEST_LATENCY_NS, String.valueOf( latency ) );
             setContext( HTTP_METHOD, method );
 
             // log SLI metrics
             if ( sliMetricSet != null )
             {
-                sliMetricSet.function( GoldenSignalsMetricSet.FN_CONTENT_GENERIC ).ifPresent( ms ->{
+                sliMetricSet.function( FN_CONTENT_GENERIC ).ifPresent( ms ->{
                     ms.latency( latency ).call();
 
                     if ( getContext( HTTP_STATUS, 200 ) > 499 )
@@ -89,9 +90,9 @@ public class ProxyMeter
                 } );
             }
 
-            MDC.put( REQUEST_PHASE, REQUEST_PHASE_END );
+            RequestContextHelper.setContext( REQUEST_PHASE, REQUEST_PHASE_END );
             restLogger.info( "END {} (from: {})", requestLine, peerAddress );
-            MDC.remove( REQUEST_PHASE );
+            RequestContextHelper.clearContext( REQUEST_PHASE );
         }
     }
 

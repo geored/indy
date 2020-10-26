@@ -15,11 +15,11 @@
  */
 package org.commonjava.indy.filer.def;
 
-import com.codahale.metrics.Meter;
-import com.codahale.metrics.Timer;
 import org.apache.commons.io.output.CountingOutputStream;
-import org.commonjava.indy.metrics.RequestContextHelper;
+import org.commonjava.indy.util.RequestContextHelper;
+import org.commonjava.maven.galley.spi.metrics.TimingProvider;
 import org.commonjava.maven.galley.util.IdempotentCloseOutputStream;
+import org.commonjava.o11yphant.metrics.api.Meter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,17 +42,17 @@ public class TimingOutputStream
 
     private Long nanos;
 
-    private Function<String, Timer.Context> timerProvider;
+    private Function<String, TimingProvider> timerProvider;
 
     private Function<String, Meter> meterProvider;
 
-    private Timer.Context timer;
+    private TimingProvider timer;
 
     private Meter meter;
 
     private BiConsumer<String, Double> cumulativeConsumer;
 
-    public TimingOutputStream( final CountingOutputStream stream, Function<String, Timer.Context> timerProvider,
+    public TimingOutputStream( final CountingOutputStream stream, Function<String, TimingProvider> timerProvider,
                                Function<String, Meter> meterProvider, BiConsumer<String, Double> cumulativeConsumer )
     {
         super( stream );

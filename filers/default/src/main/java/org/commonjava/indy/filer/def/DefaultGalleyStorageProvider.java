@@ -15,18 +15,25 @@
  */
 package org.commonjava.indy.filer.def;
 
-import com.codahale.metrics.Meter;
-import com.codahale.metrics.Timer;
+import com.datastax.driver.core.Session;
 import org.commonjava.cdi.util.weft.ExecutorConfig;
-import org.commonjava.cdi.util.weft.WeftScheduledExecutor;
+import org.commonjava.cdi.util.weft.NamedThreadFactory;
+import org.commonjava.cdi.util.weft.WeftManaged;
 import org.commonjava.indy.conf.IndyConfiguration;
 import org.commonjava.indy.content.IndyChecksumAdvisor;
 import org.commonjava.indy.content.SpecialPathSetProducer;
 import org.commonjava.indy.filer.def.conf.DefaultStorageProviderConfiguration;
-import org.commonjava.indy.metrics.IndyMetricsManager;
+import org.commonjava.o11yphant.metrics.api.Meter;
+import org.commonjava.o11yphant.metrics.api.MetricRegistry;
+import org.commonjava.o11yphant.metrics.api.Timer;
+import org.commonjava.o11yphant.metrics.DefaultMetricsManager;
+import org.commonjava.indy.subsys.metrics.conf.IndyMetricsConfig;
+import org.commonjava.indy.subsys.cassandra.CassandraClient;
+import org.commonjava.indy.subsys.cassandra.config.CassandraConfig;
 import org.commonjava.maven.galley.GalleyInitException;
 import org.commonjava.maven.galley.cache.CacheProviderFactory;
 import org.commonjava.maven.galley.cache.partyline.PartyLineCacheProviderFactory;
+import org.commonjava.maven.galley.cache.pathmapped.PathMappedCacheProviderFactory;
 import org.commonjava.maven.galley.config.TransportManagerConfig;
 import org.commonjava.maven.galley.io.ChecksummingTransferDecorator;
 import org.commonjava.maven.galley.io.NoCacheTransferDecorator;
@@ -44,7 +51,14 @@ import org.commonjava.maven.galley.spi.event.FileEventManager;
 import org.commonjava.maven.galley.spi.io.PathGenerator;
 import org.commonjava.maven.galley.spi.io.SpecialPathManager;
 import org.commonjava.maven.galley.spi.io.TransferDecorator;
+import org.commonjava.maven.galley.spi.metrics.TimingProvider;
 import org.commonjava.maven.galley.transport.htcli.UploadMetadataGenTransferDecorator;
+import org.commonjava.storage.pathmapped.config.DefaultPathMappedStorageConfig;
+import org.commonjava.storage.pathmapped.config.PathMappedStorageConfig;
+import org.commonjava.storage.pathmapped.pathdb.datastax.CassandraPathDB;
+import org.commonjava.storage.pathmapped.metrics.MeasuredPathDB;
+import org.commonjava.storage.pathmapped.spi.PathDB;
+import org.commonjava.storage.pathmapped.spi.PhysicalStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -56,14 +70,21 @@ import javax.enterprise.inject.Produces;
 import javax.inject.Inject;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.commonjava.o11yphant.metrics.util.NameUtils.getSupername;
 import static org.commonjava.maven.galley.io.checksum.ChecksummingDecoratorAdvisor.ChecksumAdvice.CALCULATE_AND_WRITE;
 import static org.commonjava.maven.galley.io.checksum.ChecksummingDecoratorAdvisor.ChecksumAdvice.NO_DECORATE;
+import static org.commonjava.storage.pathmapped.pathdb.datastax.util.CassandraPathDBUtils.*;
 
 @ApplicationScoped
 public class DefaultGalleyStorageProvider
@@ -89,9 +110,9 @@ public class DefaultGalleyStorageProvider
     private SpecialPathManager specialPathManager;
 
     @ExecutorConfig( named = "galley-delete-executor", threads = 5, priority = 2 )
-    @WeftScheduledExecutor
+    @WeftManaged
     @Inject
-    private ScheduledExecutorService deleteExecutor;
+    private ExecutorService deleteExecutor;
 
     @Inject
     private TransferMetadataConsumer contentMetadataConsumer;
@@ -103,7 +124,19 @@ public class DefaultGalleyStorageProvider
     private Instance<TransferDecorator> transferDecorators;
 
     @Inject
-    private IndyMetricsManager metricsManager;
+    private DefaultMetricsManager metricsManager;
+
+    @Inject
+    private MetricRegistry metricRegistry;
+
+    @Inject
+    private IndyMetricsConfig metricsConfig;
+
+    @Inject
+    private CassandraConfig cassandraConfig;
+
+    @Inject
+    private CassandraClient cassandraClient;
 
     private TransportManagerConfig transportManagerConfig;
 
@@ -147,14 +180,84 @@ public class DefaultGalleyStorageProvider
         }
 
         setupTransferDecoratorPipeline();
-
-        final File storeRoot = config.getStorageRootDirectory();
-
-        // Apply partyline gloable lock manager if in cluster Env
-        cacheProviderFactory = new PartyLineCacheProviderFactory( storeRoot, deleteExecutor );
+        setupCacheProviderFactory();
 
         // TODO: Tie this into a config file!
         transportManagerConfig = new TransportManagerConfig();
+    }
+
+    private void setupCacheProviderFactory()
+    {
+        final File storeRoot = config.getStorageRootDirectory();
+
+        if ( indyConfiguration.isStandalone() )
+        {
+            // Only work for local debug mode.
+            ScheduledExecutorService debugDeleteExecutor = Executors.newScheduledThreadPool( 5, new NamedThreadFactory(
+                    "debug-galley-delete-executor", new ThreadGroup( "debug-galley-delete-executor" ), true, 2 ) );
+            cacheProviderFactory = new PartyLineCacheProviderFactory( storeRoot, debugDeleteExecutor );
+            return;
+        }
+
+        PathDB pathDB = null;
+        PathMappedStorageConfig pathMappedStorageConfig = getPathMappedStorageConfig();
+        if ( cassandraClient != null )
+        {
+            String keyspace = config.getCassandraKeyspace();
+            Session session = cassandraClient.getSession( keyspace );
+            if ( session != null )
+            {
+                logger.info( "Create pathDB, keyspace: {}", keyspace );
+                pathDB = new CassandraPathDB( pathMappedStorageConfig, session, keyspace );
+            }
+        }
+
+        if ( pathDB != null )
+        {
+            if ( metricsConfig.isPathDBMetricsEnabled() )
+            {
+                final String operations = metricsConfig.getPathDBMetricsOperations();
+                logger.info( "Create measured PathDB, operations: {}" );
+                pathDB = new MeasuredPathDB( pathDB, metricsManager, getSupername( "pathDB" ) )
+                {
+                    @Override
+                    protected boolean isMetricEnabled( String metricName )
+                    {
+                        if ( isBlank( operations ) || operations.contains( metricName ) )
+                        {
+                            return true;
+                        }
+                        return false;
+                    }
+                };
+            }
+        }
+
+        PhysicalStore physicalStore = new LegacyReadonlyPhysicalStore( storeRoot );
+
+        logger.info( "Create cacheProviderFactory, pathDB: {}, physicalStore: {}", pathDB, physicalStore );
+        cacheProviderFactory =
+                        new PathMappedCacheProviderFactory( storeRoot, deleteExecutor, pathMappedStorageConfig, pathDB,
+                                                            physicalStore );
+    }
+
+    private PathMappedStorageConfig getPathMappedStorageConfig()
+    {
+        Map<String, Object> cassandraProps = new HashMap<>();
+        cassandraProps.put( PROP_CASSANDRA_HOST, cassandraConfig.getCassandraHost() );
+        cassandraProps.put( PROP_CASSANDRA_PORT, cassandraConfig.getCassandraPort() );
+        cassandraProps.put( PROP_CASSANDRA_USER, cassandraConfig.getCassandraUser() );
+        cassandraProps.put( PROP_CASSANDRA_PASS, cassandraConfig.getCassandraPass() );
+        cassandraProps.put( PROP_CASSANDRA_KEYSPACE, config.getCassandraKeyspace() );
+
+        DefaultPathMappedStorageConfig ret = new DefaultPathMappedStorageConfig( cassandraProps );
+        ret.setFileChecksumAlgorithm( config.getFileChecksumAlgorithm() );
+        ret.setGcBatchSize( config.getGcBatchSize() );
+        ret.setGcGracePeriodInHours( config.getGcGracePeriodInHours() );
+        ret.setGcIntervalInMinutes( config.getGcIntervalInMinutes() );
+        ret.setDeduplicatePattern( config.getDeduplicatePattern() );
+
+        return ret;
     }
 
     /**
@@ -163,15 +266,20 @@ public class DefaultGalleyStorageProvider
     private void setupTransferDecoratorPipeline()
     {
         List<TransferDecorator> decorators = new ArrayList<>();
-        decorators.add( new IOLatencyDecorator( timerProvider(), meterProvider(), cumulativeTimer() ));
+        decorators.add( new IOLatencyDecorator( timerProviderFunction(), meterProvider(), cumulativeTimer() ));
         decorators.add( new NoCacheTransferDecorator( specialPathManager ) );
-        decorators.add( new UploadMetadataGenTransferDecorator( specialPathManager, timerProvider() ) );
+        decorators.add( new UploadMetadataGenTransferDecorator( specialPathManager, timerProviderFunction() ) );
         for ( TransferDecorator decorator : transferDecorators )
         {
             decorators.add( decorator );
         }
         decorators.add( getChecksummingTransferDecorator() );
         transferDecorator = new TransferDecoratorManager( decorators );
+    }
+
+    private Function<String, TimingProvider> timerProviderFunction()
+    {
+        return name-> new IndyTimingProvider( name, metricsManager );
     }
 
     private BiConsumer<String, Double> cumulativeTimer()
@@ -181,12 +289,12 @@ public class DefaultGalleyStorageProvider
 
     private Function<String, Meter> meterProvider()
     {
-        return (name)->metricsManager.getMeter( name );
+        return ( name ) -> metricsManager.getMeter( name );
     }
 
     private Function<String, Timer.Context> timerProvider()
     {
-        return (name)->metricsManager.getTimer( name ).time();
+        return ( name ) -> metricsManager.startTimer( name );
     }
 
     private ChecksummingTransferDecorator getChecksummingTransferDecorator()
@@ -252,7 +360,7 @@ public class DefaultGalleyStorageProvider
             return result;
         };
 
-        return new ChecksummingTransferDecorator( readAdvisor, writeAdvisor, specialPathManager, timerProvider(),
+        return new ChecksummingTransferDecorator( readAdvisor, writeAdvisor, specialPathManager, timerProviderFunction(),
                                                   contentMetadataConsumer, new Md5GeneratorFactory(),
                                                   new Sha1GeneratorFactory(), new Sha256GeneratorFactory() );
     }
@@ -263,15 +371,6 @@ public class DefaultGalleyStorageProvider
     {
         return transportManagerConfig;
     }
-
-/*
-    @Produces
-    @Default
-    public TransferDecorator getTransferDecorator()
-    {
-        return transferDecorator;
-    }
-*/
 
     @Produces
     @Default

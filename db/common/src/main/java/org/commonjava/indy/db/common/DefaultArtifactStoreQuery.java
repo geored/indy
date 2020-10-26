@@ -19,7 +19,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.commonjava.indy.data.ArtifactStoreQuery;
 import org.commonjava.indy.data.IndyDataException;
 import org.commonjava.indy.data.StoreDataManager;
-import org.commonjava.indy.measure.annotation.Measure;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 import org.commonjava.indy.model.core.ArtifactStore;
 import org.commonjava.indy.model.core.Group;
 import org.commonjava.indy.model.core.HostedRepository;
@@ -40,13 +40,13 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static java.util.Collections.emptyList;
 import static org.commonjava.indy.model.core.StoreType.group;
 
 /**
@@ -79,12 +79,15 @@ public class DefaultArtifactStoreQuery<T extends ArtifactStore>
 
     public DefaultArtifactStoreQuery( StoreDataManager dataManager )
     {
+        logger.info( "CREATE new default store query with data manager only" );
         this.dataManager = dataManager;
     }
 
     private DefaultArtifactStoreQuery( final StoreDataManager dataManager, final String packageType,
                                        final Boolean enabled, final Class<T> storeCls )
     {
+        logger.info( "CREATE new default store query with params (internal?)" );
+
         this.dataManager = dataManager;
         this.packageType = packageType;
         this.enabled = enabled;
@@ -272,35 +275,36 @@ public class DefaultArtifactStoreQuery<T extends ArtifactStore>
              * First compare ip, if ip same, and the path(without last slash) same too, the repo is found
              * If ip not same, then compare the url without scheme and last slash (if has) to find the repo
          */
-        UrlInfo temp = null;
+        List<RemoteRepository> result = emptyList();
+        UrlInfo temp;
         try
         {
             temp = new UrlInfo( url );
         }
-        catch ( IllegalArgumentException error )
+        catch ( Exception error )
         {
-            logger.error( "Failed to find repository for: '{}'. Reason: {}", error, url, error.getMessage() );
+            logger.error( "Failed to find repository, url: '{}'. Reason: {}", url, error.getMessage() );
+            return result;
         }
 
         final UrlInfo urlInfo = temp;
-
-        List<RemoteRepository> result;
 
         // first try to find the remote repo by urlWithNoSchemeAndLastSlash
         /* @formatter:off */
         result = new DefaultArtifactStoreQuery<>( dataManager, packageType, enabled, RemoteRepository.class ).stream(
                 store -> {
-                    if ( ( StoreType.remote == store.getType() ) && urlInfo != null )
+                    if ( ( StoreType.remote == store.getType() ) )
                     {
                         final String targetUrl = ( (RemoteRepository) store ).getUrl();
-                        UrlInfo targetUrlInfo = null;
+                        UrlInfo targetUrlInfo;
                         try
                         {
                             targetUrlInfo = new UrlInfo( targetUrl );
                         }
-                        catch ( IllegalArgumentException error )
+                        catch ( Exception error )
                         {
-                            logger.error( "Failed to find repository for: '{}'. Reason: {}", error, targetUrl, error.getMessage() );
+                            logger.warn( "Invalid repository, store: {}, url: '{}'. Reason: {}", store.getKey(), targetUrl, error.getMessage() );
+                            return false;
                         }
 
                         if (  targetUrlInfo != null )
@@ -327,17 +331,18 @@ public class DefaultArtifactStoreQuery<T extends ArtifactStore>
             /* @formatter:off */
             result = new DefaultArtifactStoreQuery<>( dataManager, packageType, enabled, RemoteRepository.class ).stream(
                     store -> {
-                        if ( ( StoreType.remote == store.getType() ) && urlInfo != null )
+                        if ( ( StoreType.remote == store.getType() ) )
                         {
                             final String targetUrl = ( (RemoteRepository) store ).getUrl();
-                            UrlInfo targetUrlInfo = null;
+                            UrlInfo targetUrlInfo;
                             try
                             {
                                 targetUrlInfo = new UrlInfo( targetUrl );
                             }
-                            catch ( IllegalArgumentException error )
+                            catch ( Exception error )
                             {
-                                logger.error( "Failed to find repository for: '{}'. Reason: {}", error, targetUrl, error.getMessage() );
+                                logger.warn( "Invalid repository, store: {}, url: '{}'. Reason: {}", store.getKey(), targetUrl, error.getMessage() );
+                                return false;
                             }
 
                             if (  targetUrlInfo != null )
@@ -380,7 +385,15 @@ public class DefaultArtifactStoreQuery<T extends ArtifactStore>
     public List<ArtifactStore> getOrderedConcreteStoresInGroup( final String groupName )
             throws IndyDataException
     {
-        return getGroupOrdering( groupName, false, true );
+        logger.trace( "START: default store-query ordered-concrete-stores-in-group" );
+        try
+        {
+            return getGroupOrdering( groupName, false, true );
+        }
+        finally
+        {
+            logger.trace( "END: default store-query ordered-concrete-stores-in-group" );
+        }
     }
 
     @Override
@@ -518,7 +531,7 @@ public class DefaultArtifactStoreQuery<T extends ArtifactStore>
         final Group master = (Group) dataManager.getArtifactStore( new StoreKey( packageType, group, groupName ) );
         if ( master == null )
         {
-            return Collections.emptyList();
+            return emptyList();
         }
 
         final List<ArtifactStore> result = new ArrayList<>();

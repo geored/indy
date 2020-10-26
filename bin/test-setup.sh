@@ -53,6 +53,14 @@ if [ "x${TEST_ETC}" != "x" ]; then
 else
   echo "No test configuration specified."
   INDY_HOME=$PWD/indy
+  cat > $ETC_BASE/conf.d/default.conf <<-EOF
+[default]
+standalone=true
+[_internal]
+store.validation.enabled=false
+[ssl]
+remote.ssl.required=false
+EOF
   cat > $ETC_BASE/logging/logback.xml <<-EOF
 <configuration>
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
@@ -82,7 +90,6 @@ else
   <logger name="org.jboss.resteasy" level="DEBUG" />
   <logger name="org.jboss" level="ERROR"/>
   <logger name="org.commonjava" level="DEBUG" />
-  <logger name="org.apache.http.wire" level="DEBUG" />
   <root level="INFO">
     <appender-ref ref="STDOUT" />
     <appender-ref ref="FILE" />

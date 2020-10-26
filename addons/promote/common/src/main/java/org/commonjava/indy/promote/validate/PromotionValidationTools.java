@@ -17,6 +17,8 @@ package org.commonjava.indy.promote.validate;
 
 import groovy.lang.Closure;
 import org.commonjava.cdi.util.weft.ExecutorConfig;
+import org.commonjava.cdi.util.weft.PoolWeftExecutorService;
+import org.commonjava.cdi.util.weft.WeftExecutorService;
 import org.commonjava.cdi.util.weft.WeftManaged;
 import org.commonjava.indy.IndyWorkflowException;
 import org.commonjava.indy.content.ContentDigester;
@@ -25,9 +27,12 @@ import org.commonjava.indy.content.StoreResource;
 import org.commonjava.indy.data.IndyDataException;
 import org.commonjava.indy.data.StoreDataManager;
 import org.commonjava.indy.data.ArtifactStoreQuery;
-import org.commonjava.indy.measure.annotation.Measure;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 import org.commonjava.indy.model.core.ArtifactStore;
 import org.commonjava.indy.model.core.StoreKey;
+import org.commonjava.indy.model.core.io.IndyObjectMapper;
+import org.commonjava.indy.pkg.npm.content.PackagePath;
+import org.commonjava.indy.pkg.npm.model.PackageMetadata;
 import org.commonjava.indy.promote.conf.PromoteConfig;
 import org.commonjava.indy.promote.validate.model.ValidationRequest;
 import org.commonjava.indy.util.LocationUtils;
@@ -55,9 +60,12 @@ import org.commonjava.maven.galley.model.TransferOperation;
 import org.commonjava.maven.galley.transport.htcli.model.HttpExchangeMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.commonjava.indy.util.RequestContextHelper;
 import org.slf4j.MDC;
 
 import javax.inject.Inject;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
@@ -66,14 +74,16 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.commonjava.indy.promote.util.Batcher.batch;
+import static org.commonjava.indy.promote.util.Batcher.getParalleledBatchSize;
 import static org.commonjava.indy.promote.validate.util.ReadOnlyTransfer.readOnlyWrapper;
 import static org.commonjava.indy.promote.validate.util.ReadOnlyTransfer.readOnlyWrappers;
 import static org.commonjava.maven.galley.io.ChecksummingTransferDecorator.FORCE_CHECKSUM;
@@ -124,9 +134,12 @@ public class PromotionValidationTools
     private PromoteConfig promoteConfig;
 
     @Inject
+    private IndyObjectMapper objectMapper;
+
+    @Inject
     @WeftManaged
     @ExecutorConfig( named = "promote-validation-rules-executor", threads = 8 )
-    private Executor ruleParallelExecutor;
+    private WeftExecutorService ruleParallelExecutor;
 
     protected PromotionValidationTools()
     {
@@ -136,7 +149,7 @@ public class PromotionValidationTools
                                      final MavenPomReader pomReader, final MavenMetadataReader metadataReader,
                                      final MavenModelProcessor modelProcessor, final TypeMapper typeMapper,
                                      final TransferManager transferManager, final ContentDigester contentDigester,
-                                     final Executor ruleParallelExecutor, final PromoteConfig config )
+                                     final ThreadPoolExecutor ruleParallelExecutor, final PromoteConfig config )
     {
         contentManager = manager;
         this.storeDataManager = storeDataManager;
@@ -146,7 +159,7 @@ public class PromotionValidationTools
         this.typeMapper = typeMapper;
         this.transferManager = transferManager;
         this.contentDigester = contentDigester;
-        this.ruleParallelExecutor = ruleParallelExecutor;
+        this.ruleParallelExecutor = new PoolWeftExecutorService( "promote-validation-rules-executor", ruleParallelExecutor );
         this.promoteConfig = config;
     }
 
@@ -328,10 +341,43 @@ public class PromotionValidationTools
         return pomReader.readLocalPom( artifactRef.asProjectVersionRef(), transfer, MavenPomView.ALL_PROFILES );
     }
 
+    @Measure
+    public PackageMetadata readLocalPackageJson( final String path, final ValidationRequest request )
+            throws IndyWorkflowException
+    {
+        Transfer transfer = retrieve( request.getSourceRepository(), path );
+        try
+        {
+            if ( transfer.exists() && transfer.getPath().endsWith( "package.json" ) )
+            {
+                try (InputStream is = transfer.openInputStream())
+                {
+                    return objectMapper.readValue( is, PackageMetadata.class );
+                }
+            }
+            else
+            {
+                throw new IndyWorkflowException(
+                        "Invalid artifact path: %s. Could not parse package metadata from path.", path );
+            }
+        }
+        catch ( IOException e )
+        {
+            throw new IndyWorkflowException(
+                    "Invalid artifact path: %s. Could not parse package metadata from path by error: %s", path,
+                    e.getMessage() );
+        }
+    }
+
     public ArtifactRef getArtifact( final String path )
     {
         ArtifactPathInfo pathInfo = ArtifactPathInfo.parse( path );
         return pathInfo == null ? null : pathInfo.getArtifact();
+    }
+
+    public Optional<PackagePath> getNPMPackagePath( final String tarPath )
+    {
+        return PackagePath.parse( tarPath );
     }
 
     public MavenMetadataView getMetadata( final ProjectRef ref, final List<? extends Location> locations )
@@ -601,7 +647,7 @@ public class PromotionValidationTools
 
     public <T> void paralleledInBatch( Collection<T> collection, Closure closure )
     {
-        int batchSize = promoteConfig.getParalleledBatchSize();
+        int batchSize = getParalleledBatchSize( collection.size(), ruleParallelExecutor.getCorePoolSize() );
         logger.trace( "Exe parallel on collection {} with closure {} in batch {}", collection, closure, batchSize );
         Collection<Collection<T>> batches = batch( collection, batchSize );
         runParallelInBatchAndWait( batches, closure, logger );
@@ -609,7 +655,7 @@ public class PromotionValidationTools
 
     public <T> void paralleledInBatch( T[] array, Closure closure )
     {
-        int batchSize = promoteConfig.getParalleledBatchSize();
+        int batchSize = getParalleledBatchSize( array.length, ruleParallelExecutor.getCorePoolSize() );
         logger.trace( "Exe parallel on array {} with closure {} in batch {}", array, closure, batchSize );
         Collection<Collection<T>> batches = batch( Arrays.asList( array ), batchSize );
         runParallelInBatchAndWait( batches, closure, logger );
@@ -617,7 +663,7 @@ public class PromotionValidationTools
 
     public <K, V> void paralleledInBatch( Map<K, V> map, Closure closure )
     {
-        int batchSize = promoteConfig.getParalleledBatchSize();
+        int batchSize = getParalleledBatchSize( map.size(), ruleParallelExecutor.getCorePoolSize() );
         Set<Map.Entry<K, V>> entries = map.entrySet();
         logger.trace( "Exe parallel on map {} with closure {} in batch {}", entries, closure, batchSize );
         Collection<Collection<Map.Entry<K, V>>> batches = batch( entries, batchSize );
@@ -633,8 +679,8 @@ public class PromotionValidationTools
                 logger.trace( "The paralleled exe on batch {}", batch );
                 batch.forEach( e -> {
                     String depthStr = MDC.get( ITERATION_DEPTH );
-                    MDC.put( ITERATION_DEPTH, depthStr == null ? "0" : String.valueOf( Integer.parseInt( depthStr ) + 1 ) );
-                    MDC.put( ITERATION_ITEM, String.valueOf( e ) );
+                    RequestContextHelper.setContext( ITERATION_DEPTH, depthStr == null ? "0" : String.valueOf( Integer.parseInt( depthStr ) + 1 ) );
+                    RequestContextHelper.setContext( ITERATION_ITEM, String.valueOf( e ) );
                     try
                     {
                         closure.call( e );
@@ -661,8 +707,8 @@ public class PromotionValidationTools
         final CountDownLatch latch = new CountDownLatch( todo.size() );
         todo.forEach( e -> ruleParallelExecutor.execute( () -> {
             String depthStr = MDC.get( ITERATION_DEPTH );
-            MDC.put( ITERATION_DEPTH, depthStr == null ? "0" : String.valueOf( Integer.parseInt( depthStr ) + 1 ) );
-            MDC.put( ITERATION_ITEM, String.valueOf( e ) );
+            RequestContextHelper.setContext( ITERATION_DEPTH, depthStr == null ? "0" : String.valueOf( Integer.parseInt( depthStr ) + 1 ) );
+            RequestContextHelper.setContext( ITERATION_ITEM, String.valueOf( e ) );
 
             try
             {

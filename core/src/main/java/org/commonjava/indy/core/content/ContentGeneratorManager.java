@@ -18,7 +18,7 @@ package org.commonjava.indy.core.content;
 import org.commonjava.indy.IndyWorkflowException;
 import org.commonjava.indy.content.ContentGenerator;
 import org.commonjava.indy.content.StoreResource;
-import org.commonjava.indy.measure.annotation.Measure;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 import org.commonjava.indy.model.core.ArtifactStore;
 import org.commonjava.indy.model.core.Group;
 import org.commonjava.indy.util.LocationUtils;
@@ -92,10 +92,10 @@ public class ContentGeneratorManager
                                               EventMetadata eventMetadata ) throws IndyWorkflowException
     {
         Transfer item = null;
+        String storagePath =
+                        pathGenerator.getPath( new ConcreteResource( LocationUtils.toLocation( group ), path ) );
         for ( final ContentGenerator generator : contentGenerators )
         {
-            String storagePath =
-                    pathGenerator.getPath( new ConcreteResource( LocationUtils.toLocation( group ), path ) );
             final boolean canProcess =  generator.canProcess( path ) || generator.canProcess( storagePath );
             if ( canProcess )
             {

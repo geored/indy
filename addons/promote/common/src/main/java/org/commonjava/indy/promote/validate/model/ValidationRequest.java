@@ -15,9 +15,9 @@
  */
 package org.commonjava.indy.promote.validate.model;
 
+import org.commonjava.cdi.util.weft.ThreadContext;
 import org.commonjava.indy.IndyWorkflowException;
 import org.commonjava.indy.content.StoreResource;
-import org.commonjava.indy.data.IndyDataException;
 import org.commonjava.indy.model.core.ArtifactStore;
 import org.commonjava.indy.model.core.StoreKey;
 import org.commonjava.indy.promote.model.PathsPromoteRequest;
@@ -25,12 +25,14 @@ import org.commonjava.indy.promote.model.PromoteRequest;
 import org.commonjava.indy.promote.model.ValidationRuleSet;
 import org.commonjava.indy.promote.validate.PromotionValidationException;
 import org.commonjava.indy.promote.validate.PromotionValidationTools;
+import org.commonjava.indy.util.RequestContextHelper;
 import org.commonjava.maven.galley.model.Transfer;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -46,7 +48,13 @@ public class ValidationRequest
 
     private Set<String> requestPaths;
 
-    private ArtifactStore sourceRepository;
+    private final ArtifactStore sourceRepository;
+
+    private static final Predicate<String> DEFAULT_FILTER =
+        getMetadataPredicate().negate().and( getChecksumPredicate().negate() );
+
+    private static final String VERSION_PATTERN = "versionPattern";
+    private static final String SCOPED_VERSION_PATTERN = "scopedVersionPattern";
 
     public ValidationRequest( PromoteRequest promoteRequest, ValidationRuleSet ruleSet, PromotionValidationTools tools, ArtifactStore sourceRepository )
     {
@@ -58,10 +66,19 @@ public class ValidationRequest
     public synchronized Set<String> getSourcePaths()
             throws PromotionValidationException
     {
-        return getSourcePaths(false, false);
+        return getSourcePaths( false, false, DEFAULT_FILTER );
     }
 
     public synchronized Set<String> getSourcePaths( boolean includeMetadata, boolean includeChecksums )
+            throws PromotionValidationException
+    {
+        Predicate<String> metadata = asPredicate( includeMetadata ).or( getMetadataPredicate().negate() );
+        Predicate<String> checksums = asPredicate( includeChecksums ).or( getChecksumPredicate().negate() );
+        return getSourcePaths( includeMetadata, includeChecksums ,metadata.and( checksums ) );
+    }
+
+    private Set<String> getSourcePaths( boolean includeMetadata,
+            boolean includeChecksums , Predicate<String> filter )
             throws PromotionValidationException
     {
         if ( requestPaths == null )
@@ -72,14 +89,19 @@ public class ValidationRequest
                 paths = ( (PathsPromoteRequest) promoteRequest ).getPaths();
             }
 
-            if ( paths == null )
+            if ( paths == null || paths.isEmpty())
             {
                 if ( sourceRepository != null )
                 {
                     try
                     {
                         paths = new HashSet<>();
+                        // This is used to let galley ignore the NPMPathStorageCalculator handling,
+                        // which will append package.json to a directory transfer and make listing not applicable.
+                        ThreadContext context = ThreadContext.getContext( true );
+                        context.put( RequestContextHelper.IS_RAW_VIEW, Boolean.TRUE );
                         listRecursively( sourceRepository, "/", paths );
+                        context.put( RequestContextHelper.IS_RAW_VIEW, Boolean.FALSE );
                     }
                     catch ( IndyWorkflowException e )
                     {
@@ -93,8 +115,6 @@ public class ValidationRequest
 
         if ( !includeMetadata || !includeChecksums )
         {
-            Predicate<String> filter = ( path ) -> ( includeMetadata || !path.matches( ".+/maven-metadata\\.xml(\\.(md5|sha[0-9]+))?" ) )
-                    && ( includeChecksums || !path.matches( ".+\\.(md5|sha[0-9]+)" ) );
             return requestPaths.stream().filter( filter ).collect( Collectors.toSet() );
         }
 
@@ -128,6 +148,18 @@ public class ValidationRequest
         }
     }
 
+    private Predicate<String> asPredicate( boolean value ) {
+        return ( path ) -> value;
+    }
+
+    private static Predicate<String> getMetadataPredicate () {
+        return Pattern.compile( ".+/maven-metadata\\.xml(\\.(md5|sha[0-9]+))?" ).asPredicate();
+    }
+
+    private static Predicate<String> getChecksumPredicate () {
+        return Pattern.compile( ".+\\.(md5|sha[0-9]+)" ).asPredicate();
+    }
+
     public PromoteRequest getPromoteRequest()
     {
         return promoteRequest;
@@ -146,6 +178,26 @@ public class ValidationRequest
     public String getValidationParameter( String key )
     {
         return ruleSet.getValidationParameter( key );
+    }
+
+    public Pattern getVersionPattern( String key )
+    {
+        return ruleSet.getVersionPattern( key );
+    }
+
+    public Pattern getVersionPattern()
+    {
+        return ruleSet.getVersionPattern( VERSION_PATTERN );
+    }
+
+    public Pattern getScopedVersionPattern( String key )
+    {
+        return ruleSet.getScopedVersionPattern( key );
+    }
+
+    public Pattern getScopedVersionPattern()
+    {
+        return ruleSet.getScopedVersionPattern( SCOPED_VERSION_PATTERN );
     }
 
     public StoreKey getSource()

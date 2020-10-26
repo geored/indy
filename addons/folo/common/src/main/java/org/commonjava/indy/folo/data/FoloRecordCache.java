@@ -22,8 +22,7 @@ import org.commonjava.indy.folo.model.StoreEffect;
 import org.commonjava.indy.folo.model.TrackedContent;
 import org.commonjava.indy.folo.model.TrackedContentEntry;
 import org.commonjava.indy.folo.model.TrackingKey;
-import org.commonjava.indy.measure.annotation.Measure;
-import org.commonjava.indy.measure.annotation.MetricNamed;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 import org.commonjava.indy.subsys.infinispan.CacheHandle;
 import org.infinispan.Cache;
 import org.infinispan.commons.api.BasicCache;
@@ -42,8 +41,6 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
-
-import static org.commonjava.indy.measure.annotation.MetricNamed.DEFAULT;
 
 @ApplicationScoped
 public class FoloRecordCache
@@ -96,7 +93,7 @@ public class FoloRecordCache
      * @param entry The TrackedContentEntry which will be cached
      * @return True if a new record was stored, otherwise false
      */
-    @Measure( timers = @MetricNamed( DEFAULT ) )
+    @Measure
     public synchronized boolean recordArtifact( final TrackedContentEntry entry )
             throws FoloContentException,IndyWorkflowException
     {
@@ -123,7 +120,7 @@ public class FoloRecordCache
         } );
     }
 
-    @Measure( timers = @MetricNamed( DEFAULT ) )
+    @Measure
     public synchronized void delete( final TrackingKey key )
     {
         sealedRecordCache.remove( key );
@@ -148,7 +145,7 @@ public class FoloRecordCache
         return sealedRecordCache.containsKey( key );
     }
 
-    @Measure( timers = @MetricNamed( DEFAULT ) )
+    @Measure
     public synchronized boolean hasInProgressRecord( final TrackingKey key )
     {
         return !sealedRecordCache.containsKey( key ) && inProgressByTrackingKey( key, (qb, cacheHandle)->qb.build().getResultSize() > 0);
@@ -159,7 +156,7 @@ public class FoloRecordCache
         return sealedRecordCache.get( key );
     }
 
-    @Measure( timers = @MetricNamed( DEFAULT ) )
+    @Measure
     public TrackedContent seal( final TrackingKey trackingKey )
     {
         TrackedContent record = sealedRecordCache.get( trackingKey );

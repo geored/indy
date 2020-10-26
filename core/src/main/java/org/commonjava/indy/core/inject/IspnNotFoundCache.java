@@ -16,14 +16,12 @@
 package org.commonjava.indy.core.inject;
 
 import org.commonjava.indy.conf.IndyConfiguration;
-import org.commonjava.indy.measure.annotation.Measure;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 import org.commonjava.indy.model.core.StoreKey;
 import org.commonjava.indy.model.galley.KeyedLocation;
-import org.commonjava.indy.model.galley.RepositoryLocation;
 import org.commonjava.indy.subsys.infinispan.CacheHandle;
 import org.commonjava.maven.galley.model.ConcreteResource;
 import org.commonjava.maven.galley.model.Location;
-import org.infinispan.Cache;
 import org.infinispan.query.Search;
 import org.infinispan.query.dsl.Expression;
 import org.infinispan.query.dsl.Query;
@@ -33,7 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.PostConstruct;
 import javax.enterprise.context.ApplicationScoped;
-import javax.enterprise.inject.Default;
+import javax.enterprise.inject.Alternative;
 import javax.inject.Inject;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -49,7 +47,7 @@ import static org.commonjava.indy.model.core.StoreKey.fromString;
 import static org.commonjava.indy.model.core.StoreType.hosted;
 
 @ApplicationScoped
-@Default
+@Alternative
 public class IspnNotFoundCache
                 extends AbstractNotFoundCache
 {
@@ -75,9 +73,11 @@ public class IspnNotFoundCache
     {
     }
 
-    public IspnNotFoundCache( final IndyConfiguration config )
+    public IspnNotFoundCache( final IndyConfiguration config, CacheHandle<String, NfcConcreteResourceWrapper> nfcCache )
     {
         this.config = config;
+        this.nfcCache = nfcCache;
+        start();
     }
 
     @PostConstruct
@@ -90,16 +90,10 @@ public class IspnNotFoundCache
         } );
     }
 
-    private int getTimeoutInSeconds( ConcreteResource resource )
+    @Override
+    protected IndyConfiguration getIndyConfiguration()
     {
-        int timeoutInSeconds = config.getNotFoundCacheTimeoutSeconds();
-        Location loc = resource.getLocation();
-        Integer to = loc.getAttribute( RepositoryLocation.ATTR_NFC_TIMEOUT_SECONDS, Integer.class );
-        if ( to != null && to > 0 )
-        {
-            timeoutInSeconds = to;
-        }
-        return timeoutInSeconds;
+        return config;
     }
 
     @Override

@@ -46,6 +46,8 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static org.commonjava.indy.data.StoreDataManager.IGNORE_READONLY;
+
 @ApplicationScoped
 public class PromotionHelper
 {
@@ -86,7 +88,7 @@ public class PromotionHelper
      * @param sourcePaths The set of paths that need to be cleared from the NFC.
      * @param store The store whose affected groups should have their NFC entries cleared
      */
-    public void clearStoreNFC( final Set<String> sourcePaths, ArtifactStore store )
+    public void clearStoreNFC( final Set<String> sourcePaths, final ArtifactStore store, final Set<Group> affectedGroups )
     {
         Set<String> paths = sourcePaths.stream()
                                .map( sp -> sp.startsWith( "/" ) && sp.length() > 1 ? sp.substring( 1 ) : sp )
@@ -99,16 +101,23 @@ public class PromotionHelper
         } );
 
         Set<Group> groups;
-        try
-        {
-            groups = storeManager.query().getGroupsAffectedBy( store.getKey() );
-        }
-        catch ( IndyDataException e )
-        {
-            logger.warn( "Failed to clear NFC for groups affected by " + store.getKey(), e );
-            return;
-        }
 
+        if ( affectedGroups != null )
+        {
+            groups = affectedGroups;
+        }
+        else
+        {
+            try
+            {
+                groups = storeManager.query().getGroupsAffectedBy( store.getKey() );
+            }
+            catch ( IndyDataException e )
+            {
+                logger.warn( "Failed to clear NFC for groups affected by " + store.getKey(), e );
+                return;
+            }
+        }
         if ( groups != null )
         {
             groups.forEach( group -> {
@@ -187,10 +196,11 @@ public class PromotionHelper
     public List<String> deleteFromStore( final Set<String> completed, final ArtifactStore targetStore )
     {
         List<String> errors = new ArrayList<>();
+        final EventMetadata eventMetadata = new EventMetadata().set( IGNORE_READONLY, true );
         completed.forEach( p -> {
             try
             {
-                contentManager.delete( targetStore, p );
+                contentManager.delete( targetStore, p, eventMetadata );
             }
             catch ( IndyWorkflowException e )
             {

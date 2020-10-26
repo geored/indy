@@ -26,12 +26,18 @@ import org.commonjava.indy.core.bind.jaxrs.util.RequestUtils;
 import org.commonjava.indy.core.bind.jaxrs.util.TransferCountingInputStream;
 import org.commonjava.indy.core.bind.jaxrs.util.TransferStreamingOutput;
 import org.commonjava.indy.core.ctl.ContentController;
-import org.commonjava.indy.metrics.IndyMetricsManager;
-import org.commonjava.indy.metrics.conf.IndyMetricsConfig;
+import org.commonjava.o11yphant.metrics.DefaultMetricsManager;
+import org.commonjava.indy.subsys.metrics.conf.IndyMetricsConfig;
+import org.commonjava.indy.model.core.BatchDeleteRequest;
 import org.commonjava.indy.model.core.PackageTypes;
 import org.commonjava.indy.model.core.StoreKey;
 import org.commonjava.indy.model.core.StoreType;
-import org.commonjava.indy.util.*;
+import org.commonjava.indy.util.AcceptInfo;
+import org.commonjava.indy.util.ApplicationContent;
+import org.commonjava.indy.util.ApplicationHeader;
+import org.commonjava.indy.util.ApplicationStatus;
+import org.commonjava.indy.util.LocationUtils;
+import org.commonjava.indy.util.UriFormatter;
 import org.commonjava.maven.galley.event.EventMetadata;
 import org.commonjava.maven.galley.io.checksum.ContentDigest;
 import org.commonjava.maven.galley.model.SpecialPathInfo;
@@ -53,16 +59,19 @@ import javax.ws.rs.core.Response.Status;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-import static org.commonjava.indy.metrics.RequestContextHelper.CONTENT_ENTRY_POINT;
-import static org.commonjava.indy.metrics.RequestContextHelper.HTTP_STATUS;
-import static org.commonjava.indy.metrics.RequestContextHelper.METADATA_CONTENT;
-import static org.commonjava.indy.metrics.RequestContextHelper.PACKAGE_TYPE;
-import static org.commonjava.indy.metrics.RequestContextHelper.PATH;
-import static org.commonjava.indy.metrics.RequestContextHelper.setContext;
-import static org.commonjava.indy.core.ctl.ContentController.LISTING_HTML_FILE;
+import static org.commonjava.indy.core.bind.jaxrs.util.RequestUtils.isDirectoryPath;
+import static org.commonjava.indy.util.RequestContextHelper.CONTENT_ENTRY_POINT;
+import static org.commonjava.indy.util.RequestContextHelper.HTTP_STATUS;
+import static org.commonjava.indy.util.RequestContextHelper.METADATA_CONTENT;
+import static org.commonjava.indy.util.RequestContextHelper.PACKAGE_TYPE;
+import static org.commonjava.indy.util.RequestContextHelper.PATH;
+import static org.commonjava.indy.util.RequestContextHelper.setContext;
 import static org.commonjava.indy.pkg.npm.model.NPMPackageTypeDescriptor.NPM_PKG_KEY;
 
 @ApplicationScoped
@@ -83,7 +92,7 @@ public class ContentAccessHandler
     protected JaxRsRequestHelper jaxRsRequestHelper;
 
     @Inject
-    protected IndyMetricsManager metricsManager;
+    protected DefaultMetricsManager metricsManager;
 
     @Inject
     protected IndyMetricsConfig metricsConfig;
@@ -167,6 +176,61 @@ public class ContentAccessHandler
         return doDelete( packageType, type, name, path, eventMetadata, null );
     }
 
+    public Response doDelete( final BatchDeleteRequest request, EventMetadata eventMetadata )
+    {
+
+        StoreKey sk = request.getStoreKey();
+
+        if ( sk == null )
+        {
+            ResponseBuilder builder = Response.status( 400 );
+            return builder.build();
+        }
+
+        String packageType = sk.getPackageType();
+
+        if ( !PackageTypes.contains( packageType ) )
+        {
+            ResponseBuilder builder = Response.status( 400 );
+            return builder.build();
+        }
+
+        setContext( PACKAGE_TYPE, packageType );
+
+        Set<String> paths = request.getPaths();
+        if ( paths.isEmpty() )
+        {
+            ResponseBuilder builder = Response.status( 400 );
+            return builder.build();
+        }
+
+        eventMetadata = eventMetadata.set( ContentManager.ENTRY_POINT_STORE, sk );
+        setContext( CONTENT_ENTRY_POINT, sk.toString() );
+
+        Response response;
+        Map<String, String> results = new HashMap<>();
+        for ( final String path : paths )
+        {
+            setContext( PATH, path );
+            try
+            {
+                final ApplicationStatus result = contentController.delete( sk, path, eventMetadata );
+                results.put( path, String.valueOf( result.code() ) );
+            }
+            catch ( final IndyWorkflowException e )
+            {
+                logger.error( String.format( "Failed to tryDelete artifact: %s from: %s. Reason: %s", path, sk,
+                                             e.getMessage() ), e );
+                results.put( path, e.getMessage() );
+            }
+        }
+        ResponseBuilder builder = Response.status( 200 );
+        response = builder.entity( results ).build();
+
+        return response;
+
+    }
+
     public Response doDelete( final String packageType, final String type, final String name, final String path,
                               EventMetadata eventMetadata, final Consumer<ResponseBuilder> builderModifier )
     {
@@ -243,7 +307,7 @@ public class ContentAccessHandler
 
         Response response = null;
 
-        if ( path == null || path.equals( "" ) || request.getPathInfo().endsWith( "/" ) || path.endsWith( LISTING_HTML_FILE ) )
+        if ( isDirectoryPath( path, request ) )
         {
             response = RequestUtils.redirectContentListing( packageType, type, name, path, request, builderModifier );
         }
@@ -395,8 +459,7 @@ public class ContentAccessHandler
                 "GET path: '{}' (RAW: '{}')\nIn store: '{}'\nUser addMetadata header is: '{}'\nStandard addMetadata header for that is: '{}'",
                 path, request.getPathInfo(), sk, acceptInfo.getRawAccept(), standardAccept );
 
-        if ( path == null || path.equals( "" ) || request.getPathInfo().endsWith( "/" ) || path.endsWith(
-                LISTING_HTML_FILE ) )
+        if ( isDirectoryPath( path, request ) )
         {
             response = RequestUtils.redirectContentListing( packageType, type, name, path, request, builderModifier );
         }

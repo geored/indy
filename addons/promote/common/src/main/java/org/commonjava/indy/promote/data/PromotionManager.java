@@ -15,11 +15,11 @@
  */
 package org.commonjava.indy.promote.data;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.commonjava.cdi.util.weft.DrainingExecutorCompletionService;
 import org.commonjava.cdi.util.weft.ExecutorConfig;
 import org.commonjava.cdi.util.weft.Locker;
-import org.commonjava.cdi.util.weft.NamedThreadFactory;
+import org.commonjava.cdi.util.weft.ThreadContext;
 import org.commonjava.cdi.util.weft.WeftExecutorService;
 import org.commonjava.cdi.util.weft.WeftManaged;
 import org.commonjava.indy.IndyWorkflowException;
@@ -29,13 +29,12 @@ import org.commonjava.indy.content.DownloadManager;
 import org.commonjava.indy.core.inject.GroupMembershipLocks;
 import org.commonjava.indy.data.IndyDataException;
 import org.commonjava.indy.data.StoreDataManager;
-import org.commonjava.indy.measure.annotation.Measure;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 import org.commonjava.indy.model.core.ArtifactStore;
 import org.commonjava.indy.model.core.Group;
 import org.commonjava.indy.model.core.HostedRepository;
 import org.commonjava.indy.model.core.StoreKey;
 import org.commonjava.indy.model.core.StoreType;
-import org.commonjava.indy.pkg.maven.model.MavenPackageTypeDescriptor;
 import org.commonjava.indy.promote.callback.PromotionCallbackHelper;
 import org.commonjava.indy.promote.change.event.PathsPromoteCompleteEvent;
 import org.commonjava.indy.promote.change.event.PromoteCompleteEvent;
@@ -48,6 +47,7 @@ import org.commonjava.indy.promote.model.ValidationResult;
 import org.commonjava.indy.promote.validate.PromotionValidationException;
 import org.commonjava.indy.promote.validate.PromotionValidator;
 import org.commonjava.indy.promote.validate.model.ValidationRequest;
+import org.commonjava.indy.util.ValuePipe;
 import org.commonjava.maven.galley.event.EventMetadata;
 import org.commonjava.maven.galley.model.SpecialPathInfo;
 import org.commonjava.maven.galley.model.Transfer;
@@ -55,7 +55,7 @@ import org.commonjava.maven.galley.spi.io.SpecialPathManager;
 import org.commonjava.maven.galley.spi.nfc.NotFoundCache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.MDC;
+import org.commonjava.indy.util.RequestContextHelper;
 
 import javax.enterprise.context.ApplicationScoped;
 import javax.enterprise.event.Event;
@@ -71,8 +71,6 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -82,12 +80,15 @@ import static org.apache.commons.lang3.exception.ExceptionUtils.getStackTrace;
 import static org.commonjava.indy.change.EventUtils.fireEvent;
 import static org.commonjava.indy.core.ctl.PoolUtils.detectOverload;
 import static org.commonjava.indy.core.ctl.PoolUtils.detectOverloadVoid;
+import static org.commonjava.indy.data.StoreDataManager.AFFECTED_GROUPS;
 import static org.commonjava.indy.data.StoreDataManager.IGNORE_READONLY;
+import static org.commonjava.indy.data.StoreDataManager.TARGET_STORE;
 import static org.commonjava.indy.model.core.StoreType.hosted;
 import static org.commonjava.indy.promote.data.PromotionHelper.throwProperException;
 import static org.commonjava.indy.promote.data.PromotionHelper.timeInMillSeconds;
 import static org.commonjava.indy.promote.data.PromotionHelper.timeInSeconds;
 import static org.commonjava.indy.promote.util.Batcher.batch;
+import static org.commonjava.indy.promote.util.Batcher.getParalleledBatchSize;
 import static org.commonjava.maven.galley.model.TransferOperation.UPLOAD;
 
 /**
@@ -143,7 +144,7 @@ public class PromotionManager
     @Inject
     private Locker<StoreKey> byGroupTargetLocks;
 
-    private Map<String, StoreKey> targetGroupKeyMap = new ConcurrentHashMap<>( 1 );
+    private final Map<String, StoreKey> targetGroupKeyMap = new ConcurrentHashMap<>( 1 );
 
     @WeftManaged
     @Inject
@@ -161,11 +162,6 @@ public class PromotionManager
 
     @Inject
     private PromotionHelper promotionHelper;
-
-    @Inject
-    @WeftManaged
-    @ExecutorConfig( named = "promote-nfc-cleaner", priority = 4, daemon = true, threads = 8)
-    private ExecutorService nfcCleanExecutor;
 
     protected PromotionManager()
     {
@@ -189,24 +185,16 @@ public class PromotionManager
         this.promotionHelper = new PromotionHelper( storeManager, downloadManager, contentManager, nfc );
         this.conflictManager = new PathConflictManager();
         this.specialPathManager = specialPathManager;
-        // for testing
-        if ( nfcCleanExecutor == null )
-        {
-            nfcCleanExecutor = Executors.newFixedThreadPool( 8, new NamedThreadFactory( "promote-nfc-cleaner",
-                                                                                        new ThreadGroup(
-                                                                                                "promote-nfc-cleaner" ),
-                                                                                        true, 4 ) );
-        }
     }
 
     @Measure
     public GroupPromoteResult promoteToGroup( GroupPromoteRequest request, String user, String baseUrl )
             throws PromotionException, IndyWorkflowException
     {
-        MDC.put( PROMOTION_ID, request.getPromotionId() );
-        MDC.put( PROMOTION_TYPE, GROUP_PROMOTION );
-        MDC.put( PROMOTION_SOURCE, request.getSource().toString() );
-        MDC.put( PROMOTION_TARGET, request.getTargetKey().toString() );
+        RequestContextHelper.setContext( PROMOTION_ID, request.getPromotionId() );
+        RequestContextHelper.setContext( PROMOTION_TYPE, GROUP_PROMOTION );
+        RequestContextHelper.setContext( PROMOTION_SOURCE, request.getSource().toString() );
+        RequestContextHelper.setContext( PROMOTION_TARGET, request.getTargetKey().toString() );
 
         if ( !storeManager.hasArtifactStore( request.getSource() ) )
         {
@@ -216,11 +204,11 @@ public class PromotionManager
             return new GroupPromoteResult( request, error );
         }
 
-        final StoreKey targetKey = getTargetKey( request.getTargetGroup() );
+        final StoreKey targetKey = getTargetKey( request.getTarget().getName(), request.getTarget().getPackageType() );
 
         if ( !storeManager.hasArtifactStore( targetKey ) )
         {
-            String error = String.format( "No such target group: %s.", request.getTargetGroup() );
+            String error = String.format( "No such target group: %s.", request.getTarget() );
             logger.warn( error );
 
             return new GroupPromoteResult( request, error );
@@ -239,7 +227,7 @@ public class PromotionManager
             }
             catch ( InterruptedException | ExecutionException e )
             {
-                logger.error( "Group prromotion failed: " + request.getSource() + " -> " + request.getTargetKey(), e );
+                logger.error( "Group promotion failed: " + request.getSource() + " -> " + request.getTargetKey(), e );
                 throw new PromotionException( "Execution of group promotion failed.", e );
             }
         }
@@ -250,9 +238,9 @@ public class PromotionManager
     {
         ValidationResult validation = new ValidationResult();
         logger.info( "Running validations for promotion of: {} to group: {}", request.getSource(),
-                     request.getTargetGroup() );
+                     request.getTarget() );
 
-        final StoreKey targetKey = getTargetKey( request.getTargetGroup() );
+        final StoreKey targetKey = getTargetKey( request.getTarget().getName(), request.getTarget().getPackageType() );
         byGroupTargetLocks.lockAnd( targetKey, config.getLockTimeoutSeconds(), k -> {
             Group target;
             try
@@ -262,7 +250,7 @@ public class PromotionManager
             catch ( IndyDataException e )
             {
                 error.set( new PromotionException( "Cannot retrieve target group: %s. Reason: %s", e,
-                                                   request.getTargetGroup(), e.getMessage() ) );
+                                                   request.getTarget(), e.getMessage() ) );
                 return null;
             }
 
@@ -286,18 +274,25 @@ public class PromotionManager
 
                             storeManager.storeArtifactStore( target, changeSummary, false, true, new EventMetadata() );
                             final Group targetForNfcCleaning = target;
-                            nfcCleanExecutor.execute( () -> {
+                            final String name = String.format( "PromoteNFCClean-method(%s)-source(%s)-target(%s)",
+                                                               "doValidationAndPromote", validationRequest.getSource(),
+                                                               targetForNfcCleaning.getKey() );
+                            final String context = String.format( "Class: %s, method: %s, source: %s, target: %s",
+                                                                  this.getClass().getName(), "doValidationAndPromote",
+                                                                  validationRequest.getSource(),
+                                                                  targetForNfcCleaning.getKey() );
+                            storeManager.asyncGroupAffectedBy( new StoreDataManager.ContextualTask( name, context, () -> {
                                 try
                                 {
                                     promotionHelper.clearStoreNFC( validationRequest.getSourcePaths(),
-                                                                   targetForNfcCleaning );
+                                                                   targetForNfcCleaning, null );
                                 }
                                 catch ( PromotionValidationException e )
                                 {
                                     logger.warn( "Error happened for clear nfc during promote validation: {}",
                                                  e.getMessage() );
                                 }
-                            } );
+                            } ) );
 
                             if ( hosted == request.getSource().getType() && config.isAutoLockHostedRepos() )
                             {
@@ -349,11 +344,10 @@ public class PromotionManager
      * @param targetName the target group name
      * @return the group store key
      */
-    private StoreKey getTargetKey( final String targetName )
+    private StoreKey getTargetKey( final String targetName, final String packageType )
     {
-        return targetGroupKeyMap.computeIfAbsent( targetName,
-                                                  k -> new StoreKey( MavenPackageTypeDescriptor.MAVEN_PKG_KEY,
-                                                                     StoreType.group, targetName ) );
+        return targetGroupKeyMap.computeIfAbsent( packageType + "-" + targetName,
+                                                  k -> new StoreKey( packageType, StoreType.group, targetName ) );
     }
 
     public GroupPromoteResult rollbackGroupPromote( GroupPromoteResult result, String user )
@@ -376,13 +370,13 @@ public class PromotionManager
         }
         catch ( IndyDataException e )
         {
-            throw new PromotionException( "Cannot retrieve target group: %s. Reason: %s", e, request.getTargetGroup(),
+            throw new PromotionException( "Cannot retrieve target group: %s. Reason: %s", e, request.getTarget(),
                                           e.getMessage() );
         }
 
         if ( target == null )
         {
-            String error = String.format( "No such target group: %s.", request.getTargetGroup() );
+            String error = String.format( "No such target group: %s.", request.getTarget() );
             logger.warn( error );
 
             return new GroupPromoteResult( request, error );
@@ -481,7 +475,7 @@ public class PromotionManager
             Exception ex = error.get();
             if ( ex != null )
             {
-                String msg = "Group promotion failed. Target: " + request.getTargetGroup() + ", Source: "
+                String msg = "Group promotion failed. Target: " + request.getTarget() + ", Source: "
                         + request.getSource() + ", Reason: " + getStackTrace( ex );
                 logger.warn( msg );
                 ret = new GroupPromoteResult( request, msg );
@@ -515,10 +509,10 @@ public class PromotionManager
     public PathsPromoteResult promotePaths( final PathsPromoteRequest request, final String baseUrl )
             throws PromotionException, IndyWorkflowException
     {
-        MDC.put( PROMOTION_ID, request.getPromotionId() );
-        MDC.put( PROMOTION_TYPE, PATH_PROMOTION );
-        MDC.put( PROMOTION_SOURCE, request.getSource().toString() );
-        MDC.put( PROMOTION_TARGET, request.getTargetKey().toString() );
+        RequestContextHelper.setContext( PROMOTION_ID, request.getPromotionId() );
+        RequestContextHelper.setContext( PROMOTION_TYPE, PATH_PROMOTION );
+        RequestContextHelper.setContext( PROMOTION_SOURCE, request.getSource().toString() );
+        RequestContextHelper.setContext( PROMOTION_TARGET, request.getTargetKey().toString() );
 
         Future<PathsPromoteResult> future = submitPathsPromoteRequest( request, baseUrl );
         if ( request.isAsync() )
@@ -660,11 +654,18 @@ public class PromotionManager
     {
         final Set<String> paths = request.getPaths();
         final StoreKey source = request.getSource();
+        logger.info( "Do paths promotion, promotionId: {}, source: {}, target: {}, size: {}", request.getPromotionId(),
+                     source, request.getTarget(), paths != null ? paths.size() : -1 );
 
         List<Transfer> contents;
         if ( paths == null || paths.isEmpty() )
         {
+            // This is used to let galley ignore the NPMPathStorageCalculator handling,
+            // which will append package.json to a directory transfer and make listing not applicable.
+            ThreadContext context = ThreadContext.getContext( true );
+            context.put( RequestContextHelper.IS_RAW_VIEW, Boolean.TRUE );
             contents = downloadManager.listRecursively( source, DownloadManager.ROOT_PATH );
+            context.put( RequestContextHelper.IS_RAW_VIEW, Boolean.FALSE );
         }
         else
         {
@@ -763,13 +764,28 @@ public class PromotionManager
 
         final ArtifactStore targetStore = checkResult.targetStore;
 
-        logger.info( "Run promotion from: {} to: {}, paths: {}", request.getSource(), targetStore.getKey(), pending );
+        StoreKey targetKey = targetStore.getKey();
+        logger.info( "Run promotion from: {} to: {}, paths: {}", request.getSource(), targetKey, pending );
+        Set<Group> affectedGroups;
+        try
+        {
+            affectedGroups = storeManager.query().getGroupsAffectedBy( targetKey );
+            logger.info( "Calculate affected groups, target: {}, affected-groups: {}", targetKey, affectedGroups );
+        }
+        catch ( IndyDataException e )
+        {
+            logger.error( "Get affected groups failed", e );
+            return new PathsPromoteResult( request, pending, emptySet(), emptySet(),
+                                           "Get affected groups failed, " + e.getMessage(), validation );
+        }
 
         DrainingExecutorCompletionService<Set<PathTransferResult>> svc =
                         new DrainingExecutorCompletionService<>( transferService );
 
-        int batchSize = config.getParalleledBatchSize();
-        logger.trace( "Exe parallel on collection {} in batch {}", contents, batchSize );
+        int corePoolSize = transferService.getCorePoolSize();
+        int size = contents.size();
+        int batchSize = getParalleledBatchSize( size, corePoolSize );
+        logger.info( "Execute parallel on collection, size: {}, batch: {}", size, batchSize );
         Collection<Collection<Transfer>> batches = batch( contents, batchSize );
 
         final List<String> errors = new ArrayList<>();
@@ -777,7 +793,7 @@ public class PromotionManager
         try
         {
             detectOverloadVoid( () -> batches.forEach(
-                            batch -> svc.submit( newPathPromotionsJob( batch, targetStore, request ) ) ) );
+                            batch -> svc.submit( newPathPromotionsJob( batch, targetStore, request, affectedGroups ) ) ) );
         }
         catch ( IndyWorkflowException e )
         {
@@ -830,7 +846,16 @@ public class PromotionManager
         else
         {
             result = new PathsPromoteResult( request, emptySet(), completed, skipped, null, validation );
-            nfcCleanExecutor.execute( () -> promotionHelper.clearStoreNFC( completed, targetStore ) );
+            final String name = String.format( "PromoteNFCClean-method(%s)-source(%s)-target(%s)", "runPathPromotions",
+                                               request.getSource(), targetStore.getKey() );
+            final String context =
+                    String.format( "Class: %s, method: %s, source: %s, target: %s", this.getClass().getName(),
+                                   "runPathPromotions", request.getSource(), targetStore.getKey() );
+            storeManager.asyncGroupAffectedBy( new StoreDataManager.ContextualTask( name, context,
+                                                                                    () -> promotionHelper.clearStoreNFC(
+                                                                                                    completed,
+                                                                                                    targetStore,
+                                                                                                    affectedGroups ) ) );
             if ( request.isFireEvents() )
             {
                 fireEvent( promoteCompleteEvent, new PathsPromoteCompleteEvent( result ) );
@@ -842,11 +867,10 @@ public class PromotionManager
         return result;
     }
 
-
-
     private Callable<Set<PathTransferResult>> newPathPromotionsJob( final Collection<Transfer> transfers,
                                                                     final ArtifactStore tgt,
-                                                                    final PathsPromoteRequest request )
+                                                                    final PathsPromoteRequest request,
+                                                                    final Set<Group> affectedGroups )
     {
         return () -> {
             Set<String> pathsForMDC = new HashSet<>();
@@ -855,18 +879,19 @@ public class PromotionManager
             {
                 pathsForMDC.add( transfer.getPath() );
 
-                PathTransferResult ret = doPathTransfer( transfer, tgt, request );
+                PathTransferResult ret = doPathTransfer( transfer, tgt, request, affectedGroups );
                 results.add( ret );
             }
-            MDC.put( PROMOTION_CONTENT_PATH, pathsForMDC.toString() );
+            RequestContextHelper.setContext( PROMOTION_CONTENT_PATH, pathsForMDC.toString() );
             return results;
         };
     }
 
-    private PathTransferResult doPathTransfer( Transfer transfer, ArtifactStore tgt, PathsPromoteRequest request )
+    private PathTransferResult doPathTransfer( Transfer transfer, final ArtifactStore tgt,
+                                               final PathsPromoteRequest request, final Set<Group> affectedGroups )
                     throws IndyWorkflowException
     {
-        logger.debug( "doPathTransfer, transfer: {}, target: {}", transfer, tgt );
+        logger.debug( "Do path transfer, transfer: {}, target: {}", transfer, tgt );
 
         if ( transfer == null )
         {
@@ -880,12 +905,12 @@ public class PromotionManager
 
         long begin = System.currentTimeMillis();
 
-
         final String path = transfer.getPath();
         PathTransferResult result = new PathTransferResult( path );
 
         if ( !transfer.exists() )
         {
+            logger.debug( "Transfer not exist, {}", transfer );
             SpecialPathInfo pathInfo = specialPathManager.getSpecialPathInfo( transfer, tgt.getPackageType() );
             // if we can't decorate it, that's because we don't want to automatically generate checksums, etc. for it
             // i.e. it's something we would generate on demand for another file.
@@ -911,6 +936,7 @@ public class PromotionManager
         }
 
         Transfer target = contentManager.getTransfer( tgt, path, UPLOAD );
+        EventMetadata eventMetadata = new EventMetadata().set( IGNORE_READONLY, true );
 
         /*
          * if we hit an existing metadata.xml, we remove it from both target repo and affected groups. The metadata
@@ -923,12 +949,13 @@ public class PromotionManager
             {
                 if ( target != null && target.exists() )
                 {
-                    target.delete( true );
+                    contentManager.delete( tgt,path, eventMetadata );
+//                    target.delete( true );
                 }
                 result.skipped = true;
                 logger.info( "Metadata, mark as skipped and remove it if exists, target: {}", target );
             }
-            catch ( IOException e )
+            catch ( IndyWorkflowException e )
             {
                 String msg = String.format( "Failed to promote: %s. Target: %s. Failed to remove metadata.",
                                             transfer, request.getTarget() );
@@ -959,9 +986,12 @@ public class PromotionManager
             return result;
         }
 
+        logger.debug( "Store target transfer: {}", target );
+        eventMetadata.set( AFFECTED_GROUPS, new ValuePipe<>( affectedGroups ) ).set( TARGET_STORE, tgt );
+
         try (InputStream stream = transfer.openInputStream( true ))
         {
-            contentManager.store( tgt, path, stream, UPLOAD, new EventMetadata().set( IGNORE_READONLY, true ) );
+            contentManager.store( tgt, path, stream, UPLOAD, eventMetadata );
         }
         catch ( final IOException e )
         {

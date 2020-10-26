@@ -26,11 +26,11 @@ import org.commonjava.indy.bind.jaxrs.util.REST;
 import org.commonjava.indy.core.bind.jaxrs.ContentAccessHandler;
 import org.commonjava.indy.core.bind.jaxrs.util.RequestUtils;
 import org.commonjava.indy.folo.model.TrackingKey;
+import org.commonjava.indy.util.RequestContextHelper;
 import org.commonjava.indy.model.core.AccessChannel;
 import org.commonjava.maven.galley.event.EventMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.MDC;
 
 import javax.inject.Inject;
 import javax.servlet.http.HttpServletRequest;
@@ -46,7 +46,7 @@ import javax.ws.rs.core.StreamingOutput;
 import javax.ws.rs.core.UriInfo;
 
 import static org.commonjava.indy.IndyContentConstants.CHECK_CACHE_ONLY;
-import static org.commonjava.indy.metrics.RequestContextHelper.CONTENT_TRACKING_ID;
+import static org.commonjava.indy.util.RequestContextHelper.CONTENT_TRACKING_ID;
 import static org.commonjava.indy.folo.ctl.FoloConstants.ACCESS_CHANNEL;
 import static org.commonjava.indy.folo.ctl.FoloConstants.TRACKING_KEY;
 import static org.commonjava.indy.pkg.PackageTypeConstants.PKG_TYPE_MAVEN;
@@ -124,7 +124,7 @@ public class FoloMavenContentAccessResource
         EventMetadata metadata =
                 new EventMetadata().set( TRACKING_KEY, tk ).set( ACCESS_CHANNEL, AccessChannel.NATIVE );
 
-        MDC.put( CONTENT_TRACKING_ID, id );
+        RequestContextHelper.setContext( CONTENT_TRACKING_ID, id );
 
         return handler.doHead( PKG_TYPE_MAVEN, type, name, path, cacheOnly, baseUri, request, metadata );
     }
@@ -147,7 +147,7 @@ public class FoloMavenContentAccessResource
         EventMetadata metadata =
                 new EventMetadata().set( TRACKING_KEY, tk ).set( ACCESS_CHANNEL, AccessChannel.NATIVE );
 
-        MDC.put( CONTENT_TRACKING_ID, id );
+        RequestContextHelper.setContext( CONTENT_TRACKING_ID, id );
 
         return handler.doGet( PKG_TYPE_MAVEN, type, name, path, baseUri, request, metadata );
     }

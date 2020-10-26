@@ -16,7 +16,7 @@
 package org.commonjava.indy.pkg.maven.content;
 
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.maven.artifact.repository.metadata.Metadata;
 import org.apache.maven.artifact.repository.metadata.Plugin;
 import org.apache.maven.artifact.repository.metadata.SnapshotVersion;
@@ -42,7 +42,7 @@ import org.commonjava.indy.content.StoreResource;
 import org.commonjava.indy.core.content.AbstractMergedContentGenerator;
 import org.commonjava.indy.core.content.group.GroupMergeHelper;
 import org.commonjava.indy.data.StoreDataManager;
-import org.commonjava.indy.measure.annotation.Measure;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 import org.commonjava.indy.model.core.ArtifactStore;
 import org.commonjava.indy.model.core.Group;
 import org.commonjava.indy.model.core.StoreKey;
@@ -74,6 +74,7 @@ import java.io.StringReader;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -88,6 +89,8 @@ import java.util.stream.Collectors;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.commons.io.IOUtils.closeQuietly;
 import static org.commonjava.atlas.maven.ident.util.SnapshotUtils.LOCAL_SNAPSHOT_VERSION_PART;
+import static org.commonjava.atlas.maven.ident.util.SnapshotUtils.generateUpdateTimestamp;
+import static org.commonjava.atlas.maven.ident.util.SnapshotUtils.getCurrentTimestamp;
 import static org.commonjava.indy.core.content.group.GroupMergeHelper.GROUP_METADATA_EXISTS;
 import static org.commonjava.indy.core.content.group.GroupMergeHelper.GROUP_METADATA_GENERATED;
 import static org.commonjava.indy.core.ctl.PoolUtils.detectOverloadVoid;
@@ -350,7 +353,7 @@ public class MavenMetadataGenerator
     }
 
     /**
-     *
+     * Generate maven-metadata.xml and checksum files.
      * @param group
      * @param members Concrete stores in group
      * @param path
@@ -370,7 +373,7 @@ public class MavenMetadataGenerator
             toMergePath = normalize( normalize( parentPath( toMergePath ) ), MavenMetadataMerger.METADATA_NAME );
         }
 
-        Transfer target = fileManager.getTransfer( group, toMergePath );
+        final Transfer target = fileManager.getTransfer( group, toMergePath );
         if ( exists( target ) )
         {
             // Means there is no metadata change if this transfer exists, so directly return it.
@@ -378,28 +381,26 @@ public class MavenMetadataGenerator
             eventMetadata.set( GROUP_METADATA_EXISTS, true );
             return target;
         }
-
+        
         AtomicReference<IndyWorkflowException> wfEx = new AtomicReference<>();
-        String mergePath = toMergePath;
+        final String mergePath = toMergePath;
         boolean mergingDone = mergerLocks.ifUnlocked( computeKey(group, toMergePath), p->{
             try
             {
-                logger.debug( "Start metadata generation for the metadata file for this path {} in group {}", path,
-                              group );
+                logger.debug( "Start metadata generation for metadata file {} in group {}", path, group );
                 List<StoreKey> contributing = new ArrayList<>();
                 final Metadata md = generateGroupMetadata( group, members, contributing, path );
                 if ( md != null )
                 {
                     final Versioning versioning = md.getVersioning();
                     logger.trace(
-                            "Regenerated Metadata for group {} of path {}: latest version: {}, versioning versions:{}",
+                            "Regenerated Metadata for group {} of path {}: latest version: {}, versions: {}",
                             group.getKey(), mergePath, versioning != null ? versioning.getLatest() : null,
                             versioning != null ? versioning.getVersions() : null );
                     final ByteArrayOutputStream baos = new ByteArrayOutputStream();
                     try
                     {
-                        logger.trace( "Metadata file lost for group {} of path {}, will regenerate.", group.getKey(),
-                                      path );
+                        logger.trace( "Regenerate lost metadata, group: {}, path: {}", group.getKey(), path );
                         new MetadataXpp3Writer().write( baos, md );
 
                         final byte[] merged = baos.toByteArray();
@@ -418,7 +419,6 @@ public class MavenMetadataGenerator
                         eventMetadata.set( GROUP_METADATA_GENERATED, true );
                         MetadataInfo info = new MetadataInfo( md );
                         info.setMetadataMergeInfo( mergeInfo );
-
                         putToMetadataCache( group.getKey(), mergePath, info );
                     }
                     catch ( final IOException e )
@@ -451,11 +451,14 @@ public class MavenMetadataGenerator
 
         if ( exists( target ) )
         {
-            // if this is a checksum file, we need to return the original path.
+            // if this is a checksum file, we need to return the original path (if it is metadata, original is target)
             Transfer original = fileManager.getTransfer( group, path );
             if ( exists( original ) )
             {
-                logger.debug( "This is a checksum file, return the original path {}", path );
+                if ( toMergePath != path )
+                {
+                    logger.debug( "This is a checksum file, return the original path {}", path );
+                }
                 return original;
             }
         }
@@ -504,16 +507,14 @@ public class MavenMetadataGenerator
     }
 
     /**
-     * Will generate group related files(e.g maven-metadata.xml) from cache level, which means all the generation of the
-     * files will be cached. In terms of cache clearing, see #{@link MetadataMergeListener}
+     * Generate group related files (e.g maven-metadata.xml) from three levels.
+     * 1. cache, which means all the generation of the files will be cached. In terms of cache clearing, see #{@link MetadataMergeListener}
+     * 2. read cached from member hosted repos and try to download from member remote repos
+     * 3. generate by member hosted repos (list dir trying to find version directories)
      *
      * @param group
      * @param members concrete store in group
      * @param path
-     *
-     * @return
-     *
-     * @throws IndyWorkflowException
      */
     private Metadata generateGroupMetadata( final Group group, final List<ArtifactStore> members,
                                             final List<StoreKey> contributingMembers, final String path )
@@ -953,7 +954,7 @@ public class MavenMetadataGenerator
             coordMap.put( ARTIFACT_ID, samplePomInfo == null ? null : samplePomInfo.getArtifactId() );
             coordMap.put( GROUP_ID, samplePomInfo == null ? null : samplePomInfo.getGroupId() );
 
-            final String lastUpdated = SnapshotUtils.generateUpdateTimestamp( SnapshotUtils.getCurrentTimestamp() );
+            final String lastUpdated = generateUpdateTimestamp( getCurrentTimestamp() );
 
             doc.appendChild( doc.createElementNS( doc.getNamespaceURI(), "metadata" ) );
             xml.createElement( doc.getDocumentElement(), null, coordMap );
@@ -1016,14 +1017,17 @@ public class MavenMetadataGenerator
         return true;
     }
 
-    private boolean writeSnapshotMetadata( final ArtifactPathInfo info, final List<StoreResource> files,
+    /**
+     * First level will contain files that have the timestamp-buildNumber version suffix, e.g., 'o11yphant-metrics-api-1.0-20200805.065728-1.pom'
+     * we need to parse each this info and add them to snapshot versions.
+     */
+    private boolean writeSnapshotMetadata( final ArtifactPathInfo info, final List<StoreResource> firstLevelFiles,
                                            final ArtifactStore store, final String path,
                                            final EventMetadata eventMetadata )
         throws IndyWorkflowException
     {
-        // first level will contain files that have the timestamp-buildnumber version suffix...for each, we need to parse this info.
         final Map<SnapshotPart, Set<ArtifactPathInfo>> infosBySnap = new HashMap<>();
-        for ( final StoreResource resource : files )
+        for ( final StoreResource resource : firstLevelFiles )
         {
             final ArtifactPathInfo resInfo = ArtifactPathInfo.parse( resource.getPath() );
             if ( resInfo != null )
@@ -1052,15 +1056,12 @@ public class MavenMetadataGenerator
             final Map<String, String> coordMap = new HashMap<>();
             coordMap.put( ARTIFACT_ID, info.getArtifactId() );
             coordMap.put( GROUP_ID, info.getGroupId() );
-            coordMap.put( VERSION, info.getVersion() );
-
-            final String lastUpdated = SnapshotUtils.generateUpdateTimestamp( SnapshotUtils.getCurrentTimestamp() );
+            coordMap.put( VERSION, info.getReleaseVersion() + LOCAL_SNAPSHOT_VERSION_PART );
 
             doc.appendChild( doc.createElementNS( doc.getNamespaceURI(), "metadata" ) );
             xml.createElement( doc.getDocumentElement(), null, coordMap );
 
-            xml.createElement( doc, "versioning", Collections.singletonMap( LAST_UPDATED, lastUpdated ) );
-
+            // the last one is the most recent
             SnapshotPart snap = snaps.get( snaps.size() - 1 );
             Map<String, String> snapMap = new HashMap<>();
             if ( snap.isLocalSnapshot() )
@@ -1070,18 +1071,19 @@ public class MavenMetadataGenerator
             else
             {
                 snapMap.put( TIMESTAMP, SnapshotUtils.generateSnapshotTimestamp( snap.getTimestamp() ) );
-
                 snapMap.put( BUILD_NUMBER, Integer.toString( snap.getBuildNumber() ) );
             }
+
+            final Date currentTimestamp = getCurrentTimestamp();
+
+            final String lastUpdated = getUpdateTimestamp( snap, currentTimestamp );
+            xml.createElement( doc, "versioning", Collections.singletonMap( LAST_UPDATED, lastUpdated ) );
 
             xml.createElement( doc, "versioning/snapshot", snapMap );
 
             for ( SnapshotPart snap1 : snaps )
             {
-                snap = snap1;
-
-                // the last one is the most recent.
-                final Set<ArtifactPathInfo> infos = infosBySnap.get( snap );
+                final Set<ArtifactPathInfo> infos = infosBySnap.get( snap1 );
                 for ( final ArtifactPathInfo pathInfo : infos )
                 {
                     snapMap = new HashMap<>();
@@ -1099,7 +1101,7 @@ public class MavenMetadataGenerator
 
                     snapMap.put( EXTENSION, mapping == null ? pathInfo.getType() : mapping.getExtension() );
                     snapMap.put( VALUE, pathInfo.getVersion() );
-                    snapMap.put( UPDATED, lastUpdated );
+                    snapMap.put( UPDATED, getUpdateTimestamp( pathInfo.getSnapshotInfo(), currentTimestamp ) );
 
                     xml.createElement( doc, "versioning/snapshotVersions/snapshotVersion", snapMap );
                 }
@@ -1125,6 +1127,16 @@ public class MavenMetadataGenerator
         }
 
         return true;
+    }
+
+    private String getUpdateTimestamp( SnapshotPart snapshot, Date currentTimestamp )
+    {
+        Date timestamp = snapshot.getTimestamp();
+        if ( timestamp == null )
+        {
+            timestamp = currentTimestamp;
+        }
+        return generateUpdateTimestamp( timestamp );
     }
 
     // Parking this here, transplanted from ScheduleManager, because this is where it belongs. It might be

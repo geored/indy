@@ -68,7 +68,7 @@ import static javax.ws.rs.core.Response.noContent;
 import static javax.ws.rs.core.Response.notModified;
 import static javax.ws.rs.core.Response.ok;
 import static javax.ws.rs.core.Response.status;
-import static org.apache.commons.lang.StringUtils.isEmpty;
+import static org.apache.commons.lang3.StringUtils.isEmpty;
 import static org.commonjava.indy.model.core.ArtifactStore.METADATA_CHANGELOG;
 import static org.commonjava.indy.util.ApplicationContent.application_json;
 
@@ -430,7 +430,7 @@ public class DeprecatedStoreAdminHandler
 
             String user = securityManager.getUser( securityContext, request );
 
-            adminController.delete( key, user, summary );
+            adminController.delete( key, user, summary, false );
 
             response = responseHelper.markDeprecated( noContent(), altPath ).build();
         }

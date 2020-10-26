@@ -15,9 +15,8 @@
  */
 package org.commonjava.indy.pkg.npm.content;
 
-import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.Timer;
-import org.commonjava.indy.metrics.IndyMetricsManager;
+import org.commonjava.o11yphant.metrics.api.Timer;
+import org.commonjava.o11yphant.metrics.DefaultMetricsManager;
 import org.commonjava.indy.model.core.StoreKey;
 import org.commonjava.indy.model.galley.KeyedLocation;
 import org.commonjava.maven.galley.event.EventMetadata;
@@ -32,7 +31,6 @@ import org.slf4j.LoggerFactory;
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 import java.io.ByteArrayOutputStream;
-import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -49,7 +47,7 @@ public class NPMPackageMaskingTransferDecorator
     private final Logger logger = LoggerFactory.getLogger( this.getClass() );
 
     @Inject
-    private IndyMetricsManager metricsManager;
+    private DefaultMetricsManager metricsManager;
 
     public NPMPackageMaskingTransferDecorator()
     {
@@ -102,14 +100,16 @@ public class NPMPackageMaskingTransferDecorator
 
         private String contextURL;
 
-        private IndyMetricsManager metricsManager;
+        private DefaultMetricsManager metricsManager;
 
         private byte[] bytes;
 
         boolean masked;
 
+        private static final int SIZE = 1024;
+
         private PackageMaskingInputStream( final InputStream stream, final String contextURL,
-                                           final IndyMetricsManager metricsManager )
+                                           final DefaultMetricsManager metricsManager )
         {
             super( stream );
             this.contextURL = contextURL;
@@ -159,14 +159,17 @@ public class NPMPackageMaskingTransferDecorator
 
         private void mask( String contextURL ) throws IOException
         {
-            Timer.Context timer = metricsManager == null ? null : metricsManager.getTimer( TIMER ).time();
+            Timer.Context timer = metricsManager == null ? null : metricsManager.startTimer( TIMER );
             try
             {
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 int read;
-                while ( ( read = super.read() ) >= 0 )
                 {
-                    bos.write( read );
+                    byte[] buffer = new byte[SIZE];
+                    while ( ( read = super.read(buffer, 0, buffer.length) ) >= 0 )
+                    {
+                        bos.write( buffer, 0, read );
+                    }
                 }
                 byte[] rawBytes = bos.toByteArray();
                 String raw = new String( rawBytes, UTF_8 );
@@ -183,7 +186,7 @@ public class NPMPackageMaskingTransferDecorator
             {
                 if ( timer != null )
                 {
-                    timer.stop();
+                    metricsManager.stopTimer( TIMER );
                 }
             }
         }

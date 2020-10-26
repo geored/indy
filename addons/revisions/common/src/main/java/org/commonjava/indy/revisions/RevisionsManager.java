@@ -15,8 +15,8 @@
  */
 package org.commonjava.indy.revisions;
 
-import static org.apache.commons.lang.StringUtils.isEmpty;
-import static org.apache.commons.lang.StringUtils.join;
+import static org.apache.commons.lang3.StringUtils.isEmpty;
+import static org.apache.commons.lang3.StringUtils.join;
 import static org.commonjava.indy.audit.ChangeSummary.SYSTEM_USER;
 
 import java.io.File;
@@ -36,11 +36,10 @@ import org.apache.commons.io.FileUtils;
 import org.commonjava.indy.audit.ChangeSummary;
 import org.commonjava.indy.change.event.IndyLifecycleEvent;
 import org.commonjava.indy.data.StoreDataManager;
-import org.commonjava.indy.measure.annotation.Measure;
-import org.commonjava.indy.measure.annotation.MetricNamed;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 
 import static org.commonjava.indy.flat.data.DataFileStoreUtils.INDY_STORE;
-import static org.commonjava.indy.metrics.IndyMetricsConstants.DEFAULT;
+
 import org.commonjava.indy.model.core.StoreKey;
 import org.commonjava.indy.revisions.conf.RevisionsConfig;
 import org.commonjava.indy.subsys.datafile.DataFile;
@@ -210,7 +209,7 @@ public class RevisionsManager
         }
     }
 
-    @Measure( timers = @MetricNamed( DEFAULT ) )
+    @Measure
     private void addOrDeleteFiles( DataFileEvent event ) throws GitSubsystemException
     {
         if ( event.getType() == DataFileEventType.deleted )
@@ -236,7 +235,7 @@ public class RevisionsManager
         // FIXME: fire events to signal data owners to reload...
     }
 
-    @Measure( timers = @MetricNamed( DEFAULT ) )
+    @Measure
     public int commitDataUpdates()
                     throws GitSubsystemException
     {
@@ -248,7 +247,7 @@ public class RevisionsManager
         return dataFileGit.commit();
     }
 
-    @Measure( timers = @MetricNamed( DEFAULT ) )
+    @Measure
     public void pushDataUpdates()
         throws GitSubsystemException
     {

@@ -15,15 +15,13 @@
  */
 package org.commonjava.indy.content.index;
 
-import org.commonjava.cdi.util.weft.ExecutorConfig;
-import org.commonjava.cdi.util.weft.WeftManaged;
 import org.commonjava.indy.IndyWorkflowException;
 import org.commonjava.indy.content.ContentManager;
 import org.commonjava.indy.content.index.conf.ContentIndexConfig;
 import org.commonjava.indy.core.content.PathMaskChecker;
 import org.commonjava.indy.data.IndyDataException;
 import org.commonjava.indy.data.StoreDataManager;
-import org.commonjava.indy.measure.annotation.Measure;
+import org.commonjava.o11yphant.metrics.annotation.Measure;
 import org.commonjava.indy.model.core.ArtifactStore;
 import org.commonjava.indy.model.core.Group;
 import org.commonjava.indy.model.core.HostedRepository;
@@ -47,6 +45,7 @@ import javax.enterprise.inject.Any;
 import javax.inject.Inject;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
@@ -89,11 +88,6 @@ public abstract class IndexingContentManagerDecorator
     @Inject
     private ContentIndexConfig indexCfg;
 
-    @Inject
-    @WeftManaged
-    @ExecutorConfig( named = "content-index-store-deindex", priority = 4, threads = 10 )
-    private Executor deIndexExecutor;
-
     protected IndexingContentManagerDecorator()
     {
     }
@@ -124,7 +118,6 @@ public abstract class IndexingContentManagerDecorator
                                                final ContentIndexConfig indexCfg, final Executor deIndexExecutor)
     {
         this(delegate, storeDataManager, specialPathManager, indexManager, nfc, indexCfg);
-        this.deIndexExecutor = deIndexExecutor;
     }
 
     @Override
@@ -139,6 +132,11 @@ public abstract class IndexingContentManagerDecorator
                                    final EventMetadata eventMetadata )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.retrieveFirst( stores, path, eventMetadata );
+        }
+
         Transfer transfer = null;
         for ( ArtifactStore store : stores )
         {
@@ -164,6 +162,11 @@ public abstract class IndexingContentManagerDecorator
                                        final EventMetadata eventMetadata )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.retrieveAll( stores, path, eventMetadata );
+        }
+
         List<Transfer> results = new ArrayList<>();
         stores.stream().map( ( store ) -> {
             try
@@ -194,6 +197,11 @@ public abstract class IndexingContentManagerDecorator
     public Transfer retrieve( final ArtifactStore store, final String path, final EventMetadata eventMetadata )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.retrieve( store, path, eventMetadata );
+        }
+
         if ( store == null )
         {
             return null;
@@ -460,6 +468,11 @@ public abstract class IndexingContentManagerDecorator
     public Transfer getTransfer( final ArtifactStore store, final String path, final TransferOperation op )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.getTransfer( store, path, op );
+        }
+
         Transfer transfer = getIndexedTransfer( store.getKey(), null, path, TransferOperation.DOWNLOAD, new EventMetadata(  ) );
         if ( exists( transfer ) )
         {
@@ -592,6 +605,11 @@ public abstract class IndexingContentManagerDecorator
     public Transfer getTransfer( final StoreKey storeKey, final String path, final TransferOperation op )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.getTransfer( storeKey, path, op );
+        }
+
         Transfer transfer = getIndexedTransfer( storeKey, null, path, TransferOperation.DOWNLOAD, new EventMetadata(  ) );
         if ( exists( transfer ) )
         {
@@ -677,6 +695,11 @@ public abstract class IndexingContentManagerDecorator
     public Transfer getTransfer( final List<ArtifactStore> stores, final String path, final TransferOperation op )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.getTransfer( stores, path, op );
+        }
+
         Transfer transfer = null;
         for ( ArtifactStore store : stores )
         {
@@ -704,6 +727,11 @@ public abstract class IndexingContentManagerDecorator
                            final TransferOperation op, final EventMetadata eventMetadata )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.store( store, path, stream, op, eventMetadata );
+        }
+
         Logger logger = LoggerFactory.getLogger( getClass() );
         logger.trace( "Storing: {} in: {} from indexing level", path, store.getKey() );
         Transfer transfer = delegate.store( store, path, stream, op, eventMetadata );
@@ -715,24 +743,27 @@ public abstract class IndexingContentManagerDecorator
                 indexManager.indexTransferIn( transfer, store.getKey() );
             }
 
-            if ( store instanceof Group )
-            {
-                nfc.clearMissing( new ConcreteResource( LocationUtils.toLocation( store ), path ) );
-            }
+            nfc.clearMissing( new ConcreteResource( LocationUtils.toLocation( store ), path ) );
+
             // We should deIndex the path for all parent groups because the new content of the path
             // may change the content index sequence based on the constituents sequence in parent groups
             if ( store.getType() == StoreType.hosted )
             {
-                //FIXME: One potential problem here: The fixed thread pool is using a blocking queue to
-                // cache runnables, which could cause OOM if there are bunch of uploading happened in
-                // a short time period. We need to monitor if this could happen.
-                deIndexExecutor.execute( () -> {
+                final String name = String.format( "ContentIndexStoreDeIndex-store(%s)-path(%s)", store.getKey(), path );
+                final String context =
+                        String.format( "Class: %s, method: %s, store: %s, path: %s", this.getClass().getName(), "store",
+                                       store.getKey(), path );
+                storeDataManager.asyncGroupAffectedBy( new StoreDataManager.ContextualTask(name, context, () -> {
                     try
                     {
-                        Set<Group> groups = storeDataManager.query().getGroupsAffectedBy( store.getKey() );
+                        Set<Group> groups =
+                                        storeDataManager.affectedBy( Arrays.asList( store.getKey() ), eventMetadata );
                         if ( groups != null && !groups.isEmpty() && indexCfg.isEnabled() )
                         {
-                            groups.forEach( g -> indexManager.deIndexStorePath( g.getKey(), path ) );
+                            groups.forEach( g -> {
+                                indexManager.deIndexStorePath( g.getKey(), path );
+                                nfc.clearMissing( new ConcreteResource( LocationUtils.toLocation( g ), path ) );
+                            } );
                         }
                     }
                     catch ( IndyDataException e )
@@ -741,26 +772,22 @@ public abstract class IndexingContentManagerDecorator
                                 String.format( "Failed to get groups which contains: %s for NFC handling. Reason: %s",
                                                store.getKey(), e.getMessage() ), e );
                     }
-                } );
+                } ) );
             }
         }
-//        nfcClearByContaining( store, path );
-
         return transfer;
     }
-
-    //    @Override
-    //    public Transfer store( final List<? extends ArtifactStore> stores, final String path, final InputStream stream, final TransferOperation op )
-    //            throws IndyWorkflowException
-    //    {
-    //        return store( stores, path, stream, op, new EventMetadata() );
-    //    }
 
     @Override
     public Transfer store( final List<? extends ArtifactStore> stores, final StoreKey topKey, final String path,
                            final InputStream stream, final TransferOperation op, final EventMetadata eventMetadata )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.store( stores, topKey, path, stream, op, eventMetadata );
+        }
+
         Transfer transfer = delegate.store( stores, topKey, path, stream, op, eventMetadata );
         if ( transfer != null )
         {
@@ -803,6 +830,11 @@ public abstract class IndexingContentManagerDecorator
     public boolean delete( final ArtifactStore store, final String path, final EventMetadata eventMetadata )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.delete( store, path, eventMetadata );
+        }
+
         boolean result = delegate.delete( store, path, eventMetadata );
         if ( result && indexCfg.isEnabled() )
         {
@@ -824,6 +856,11 @@ public abstract class IndexingContentManagerDecorator
                               final EventMetadata eventMetadata )
             throws IndyWorkflowException
     {
+        if ( !indexCfg.isEnabled() )
+        {
+            return delegate.deleteAll( stores, path, eventMetadata );
+        }
+
         boolean result = false;
         for ( ArtifactStore store : stores )
         {
